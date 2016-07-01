@@ -77,18 +77,16 @@ void setTargetPidLooptime(uint8_t pidProcessDenom)
     targetPidLooptime = targetLooptime * pidProcessDenom;
 }
 
-uint16_t getDynamicKi(int axis, const pidProfile_t *pidProfile, int32_t angleRate) 
+void antiWindupScaling(int axis, const pidProfile_t *pidProfile, int32_t gyroRate)
 {
-    uint16_t dynamicKi;
-    uint16_t resetRate;
+    uint16_t resetRate = (axis == YAW) ? pidProfile->yawItermIgnoreRate : pidProfile->rollPitchItermIgnoreRate;
 
-    resetRate = (axis == YAW) ? pidProfile->yawItermIgnoreRate : pidProfile->rollPitchItermIgnoreRate;
-
-    uint16_t dynamicFactor = (1 << 8) - constrain((ABS(angleRate) << 6) / resetRate, 0, 1 << 8);
-
-    dynamicKi = (pidProfile->I8[axis] * dynamicFactor) >> 8;
-
-    return dynamicKi;
+    if (pidProfile->pidController == PID_CONTROLLER_INTEGER) {
+        uint16_t dynamicFactor = (1 << 8) - constrain((ABS(gyroRate) << 6) / resetRate, 0, 1 << 8);
+        errorGyroI[axis] = (errorGyroI[axis] * dynamicFactor) >> 8;
+    } else {
+        errorGyroIf[axis] = errorGyroIf[axis] * (1.0f - constrainf((float)resetRate / ABS(gyroRate), 0.0f, 1.0f));
+    }
 }
 
 void pidResetErrorGyroState(void)
@@ -196,12 +194,13 @@ static void pidFloat(const pidProfile_t *pidProfile, uint16_t max_angle_inclinat
         }
 
         // -----calculate I component.
-        uint16_t kI = (pidProfile->dynamic_pid) ? getDynamicKi(axis, pidProfile, (int32_t)angleRate[axis]) : pidProfile->I8[axis];
-
-        errorGyroIf[axis] = constrainf(errorGyroIf[axis] + luxITermScale * errorLimiter * RateError * getdT() * kI, -250.0f, 250.0f);
+        errorGyroIf[axis] = constrainf(errorGyroIf[axis] + luxITermScale * errorLimiter * RateError * getdT(), -250.0f, 250.0f);
 
         // limit maximum integrator value to prevent WindUp - accumulating extreme values when system is saturated.
         // I coefficient (I8) moved before integration to make limiting independent from PID settings
+
+        if (pidProfile->dynamic_pid) antiWindupScaling(axis, pidProfile, (int32_t)gyroRate);
+
         ITerm = errorGyroIf[axis];
 
         //-----calculate D-term
@@ -331,15 +330,15 @@ static void pidInteger(const pidProfile_t *pidProfile, uint16_t max_angle_inclin
         // Precision is critical, as I prevents from long-time drift. Thus, 32 bits integrator is used.
         // Time correction (to avoid different I scaling for different builds based on average cycle time)
         // is normalized to cycle time = 2048.
-        uint16_t kI = (pidProfile->dynamic_pid) ? getDynamicKi(axis, pidProfile, AngleRateTmp) : pidProfile->I8[axis];
-
         int32_t rateErrorLimited = errorLimiter * RateError;
 
-        errorGyroI[axis] = errorGyroI[axis] + ((rateErrorLimited  * (uint16_t)targetPidLooptime) >> 11) * kI;
+        errorGyroI[axis] = errorGyroI[axis] + ((rateErrorLimited  * (uint16_t)targetPidLooptime) >> 11);
 
         // limit maximum integrator value to prevent WindUp - accumulating extreme values when system is saturated.
         // I coefficient (I8) moved before integration to make limiting independent from PID settings
         errorGyroI[axis] = constrain(errorGyroI[axis], (int32_t) - GYRO_I_MAX << 13, (int32_t) + GYRO_I_MAX << 13);
+
+        if (pidProfile->dynamic_pid) antiWindupScaling(axis, pidProfile, gyroRate);
 
         ITerm = errorGyroI[axis] >> 13;
 
